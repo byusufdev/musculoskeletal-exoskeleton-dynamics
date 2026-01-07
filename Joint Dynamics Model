@@ -1,0 +1,36 @@
+from numpy.ma import sin, cos
+
+
+class ActuatedJointSystem:
+    def __init__(self, momentOfInertia, frictionCoef, springK, gravityFactor):
+        self.momentOfInertia = momentOfInertia
+        self.frictionCoef = frictionCoef
+        self.springK = springK
+        self.gravityFactor = gravityFactor
+        self.derivativeContainer = []
+        for i in range(0, 1):
+            self.derivativeContainer.append(0)
+
+    def evaluateNonLinearResponse(self, machineTorque, operatorTorque, angle, omega, zeroAngle):
+        self.machineTorque = machineTorque
+        self.operatorTorque = operatorTorque
+        self.angle = angle
+        self.omega = omega
+        self.zeroAngle = zeroAngle
+        self.alpha = 1 / self.momentOfInertia * (self.machineTorque + self.operatorTorque - (
+            self.frictionCoef * self.omega + self.springK*(
+                self.angle - self.zeroAngle) + self.gravityFactor * sin(
+                self.angle - self.zeroAngle)))
+        return self.alpha
+
+    def evaluateLinearResponse(self, machineTorque, operatorTorque, angle, omega, zeroAngle, linearPoint):
+        self.machineTorque = machineTorque
+        self.operatorTorque = operatorTorque
+        self.angle = angle
+        self.linearPoint = linearPoint
+        self.omega = omega
+        self.zeroAngle = zeroAngle
+        self.alpha = 1 / self.momentOfInertia * (self.machineTorque + self.operatorTorque - (
+            self.frictionCoef * self.omega + self.springK*(
+                self.angle - self.zeroAngle) + self.gravityFactor * cos(self.linearPoint - self.zeroAngle)*(self.linearPoint - self.zeroAngle)))
+        return self.alpha
