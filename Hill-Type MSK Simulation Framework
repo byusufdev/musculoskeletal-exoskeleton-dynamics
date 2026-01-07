@@ -1,0 +1,440 @@
+from numpy.ma import exp, sin, cos
+import numpy as np
+from scipy import signal
+
+# Hill-type MSK sim
+class MusculoSkeletalGeometry(object):
+    """
+       Fiber length and leverage
+    """
+
+    def __init__(self, tissueID):
+        print("Representation of the unit :" + " " + tissueID)
+        self.geoCoeffs = []
+        for i in range(5):
+            self.geoCoeffs.append(1)
+        self.leverCoeffs = []
+        for i in range(4):
+            self.leverCoeffs.append(1)
+        self.bioProperties = []
+        for i in range(4):
+            self.bioProperties.append(1)
+        self.distalAngle = 0
+        self.proximalAngle = 0
+        self.tissueID = tissueID
+        self.fiberLenScale = 0
+        if tissueID == "rf":
+            self.bioProperties = ([0.084, 0.346, 1780, 5 * 3.14 / 180])
+            self.optFiberLen = self.bioProperties[0]
+            self.seriesElasticLen = self.bioProperties[1]
+            self.maxIsoForce = self.bioProperties[2]
+            self.pennationRad = self.bioProperties[3]
+            self.geoCoeffs = ([0.0044304, -0.0024913, -0.046268, 0.44897, -0.0434])
+            self.leverCoeffs = ([-0.011185, -0.047117, -0.032102, 0.044659])
+
+        elif tissueID == "vl":
+            self.bioProperties = ([0.084, 0.157, 1870, 5 * 3.14 / 180])
+            self.optFiberLen = self.bioProperties[0]
+            self.seriesElasticLen = self.bioProperties[1]
+            self.maxIsoForce = self.bioProperties[2]
+            self.pennationRad = self.bioProperties[3]
+            self.geoCoeffs = ([0.0004555, -0.0066869, -0.051383, 0.19889, 0])
+            self.leverCoeffs = ([-0.011185, -0.047117, -0.032102, 0.044659])
+
+        elif tissueID == "vm":
+            self.bioProperties = ([0.089, 0.126, 1295, 5 * 3.14 / 180])
+            self.optFiberLen = self.bioProperties[0]
+            self.seriesElasticLen = self.bioProperties[1]
+            self.maxIsoForce = self.bioProperties[2]
+            self.pennationRad = self.bioProperties[3]
+            self.geoCoeffs = ([8.6453 ** -5, -0.0068273, -0.050411, 0.17151, 0])
+            self.leverCoeffs = ([-0.011185, -0.047117, -0.032102, 0.044659])
+
+        else: # choice == "vi"
+            self.bioProperties = ([0.087, 0.136, 1235, 5 * 3.14 / 180])
+            self.optFiberLen = self.bioProperties[0]
+            self.seriesElasticLen = self.bioProperties[1]
+            self.maxIsoForce = self.bioProperties[2]
+            self.pennationRad = self.bioProperties[3]
+            self.geoCoeffs = ([0.0014072, -0.003718, -0.04929, 0.18153, 0])
+            self.leverCoeffs = ([-0.011185, -0.047117, -0.032102, 0.044659])
+
+    def calcFiberLength(self, distalAngle, proximalAngle):
+        self.distalAngle = distalAngle
+        self.proximalAngle = proximalAngle
+        self.currentFiberLen = self.geoCoeffs[0] * self.distalAngle ** 3 + self.geoCoeffs[
+            1] * self.distalAngle ** 2 + self.geoCoeffs[2] * self.distalAngle + self.geoCoeffs[3] + \
+                       self.geoCoeffs[4] * self.proximalAngle
+        return self.currentFiberLen + self.fiberLenScale
+
+    def calcMomentArm(self, distalAngle, proximalAngle):
+        self.distalAngle = distalAngle
+        self.proximalAngle = proximalAngle
+        self.currentMomentArm = self.leverCoeffs[0] * self.distalAngle + self.leverCoeffs[
+            1] * self.distalAngle ** 2 + self.leverCoeffs[2] * self.distalAngle ** 3 + self.leverCoeffs[
+                                      3] * self.proximalAngle
+        return self.currentMomentArm
+
+
+class FiberActiveTension(object):
+    """
+        Compute force-length properties
+    """
+
+    def __init__(self):
+        self.gaussianShapeFactor = 0.45
+
+    def calcActiveForceFactor(self, currentLen, optLen):
+        self.optLen = optLen
+        self.currentLen = currentLen
+
+        return exp(- (currentLen / self.optLen - 1) ** 2 / self.gaussianShapeFactor)
+
+
+class SeriesElasticElement(object):
+    """
+        Compute tendon force
+    """
+
+    def __init__(self):
+        self.maxStrain = 0.033
+        self.linearShapeFactor = 1.712 / self.maxStrain
+        self.linearStrainLimit =  0.609 * self.maxStrain
+        self.normMaxForceLinear = 0.333333
+        self.nonLinearShapeFactor = 3
+
+    def calcSeriesForce(self, currentTendonLen, slackLen):
+        self.currentTendonLen = currentTendonLen
+        self.slackLen = slackLen
+        self.relativeLen = ( self.currentTendonLen - self.slackLen ) / self.slackLen
+        if self.relativeLen <= 0 :
+            self.tension = 0
+        elif self.relativeLen > 0 and self.relativeLen <= self.linearStrainLimit :
+            self.tension = self.normMaxForceLinear * (exp(self.nonLinearShapeFactor * self.relativeLen / self.linearStrainLimit) - 1) / ( exp( self.nonLinearShapeFactor ) - 1)
+        else :
+            self.tension = self.linearShapeFactor * (self.relativeLen - self.linearStrainLimit ) + self.normMaxForceLinear
+
+        return self.tension + 0.001 * (1 + self.relativeLen)
+
+
+class FiberPassiveTension(object):
+
+    """
+        Compute muscle passive force
+    """
+
+    def __init__(self):
+        self.exponentialShapeFactor = 4 
+        self.normMaxPassiveForce = 0.6 
+
+    def calcParallelForce(self, currentLen, optLen):
+        self.currentLen = currentLen
+        self.optLen = optLen
+        self.normLen = self.currentLen / self.optLen
+        if self.normLen <= 1 + self.normMaxPassiveForce :
+            parallelForce = (exp(self.exponentialShapeFactor*(self.normLen-1)/self.normMaxPassiveForce)) / (exp(self.exponentialShapeFactor))
+        elif self.normLen > 1 + self.normMaxPassiveForce :
+            parallelForce = 1+ self.exponentialShapeFactor/self.normMaxPassiveForce * (self.normLen-(1+self.normMaxPassiveForce))
+        else :
+            parallelForce = 0
+
+        return parallelForce
+        
+
+class VelocityToForceMapper(object):
+
+    """
+        Compute the inverse force-velocity properties
+    """
+    def __init__(self):
+        self.maxEccentricForce = 1.8
+        self.curvinessFactor = 0.3
+        self.damperVal = 0.5
+        
+    def calcNormVelocity(self, activeForceComp, totalContractile):
+        self.forceVelRatio = activeForceComp/(totalContractile+0.001)
+
+        if self.forceVelRatio < 0:
+            self.normRate = (1 + 1 / self.curvinessFactor)*self.forceVelRatio - 1
+        elif self.forceVelRatio >=0 and self.forceVelRatio < 1 :
+            self.normRate = (self.forceVelRatio - 1)/(1 + self.forceVelRatio / self.curvinessFactor )
+        elif self.forceVelRatio >= 1 and self.forceVelRatio < 0.95 * self.maxEccentricForce :            
+            self.normRate = (self.forceVelRatio - 1 ) * ( self.maxEccentricForce - 1 ) / ((2 + 2/self.curvinessFactor)*(self.maxEccentricForce - self.forceVelRatio))
+        elif self.forceVelRatio >= 0.95 * self.maxEccentricForce and self.forceVelRatio < self.maxEccentricForce :
+            self.normRate = (10 * (self.maxEccentricForce - 1))/((1 + 1 / self.curvinessFactor) * self.maxEccentricForce) * (-18.05 * self.maxEccentricForce + 18 + 20 * self.forceVelRatio * (self.maxEccentricForce - 1)/(self.maxEccentricForce))
+        else :
+            self.normRate = self.maxEccentricForce
+        return self.normRate    
+
+    def calcAlternativeNormVelocity(self, excitInput, totalContractile, velDependentForce):
+        self.velDependentForce = velDependentForce
+        self.totalContractile = totalContractile
+        self.excitInput = excitInput
+        if self.velDependentForce < self.excitInput*self.totalContractile :
+            self.normRate = (1/2)*(self.velDependentForce +self.excitInput*self.totalContractile*self.curvinessFactor+self.damperVal*self.curvinessFactor-np.sqrt(self.velDependentForce*self.velDependentForce+2*self.excitInput*self.totalContractile*self.curvinessFactor*self.velDependentForce-2*self.damperVal*self.curvinessFactor*self.velDependentForce+self.excitInput*self.excitInput*self.totalContractile*self.totalContractile*self.curvinessFactor*self.curvinessFactor+2*self.excitInput*self.totalContractile*self.curvinessFactor*self.curvinessFactor*self.damperVal+self.damperVal*self.damperVal*self.curvinessFactor*self.curvinessFactor+4*self.damperVal*self.excitInput*self.totalContractile*self.curvinessFactor))/self.damperVal        
+        else:            
+            self.normRate = -(0.5e-2*(-100*self.velDependentForce+180*self.excitInput*self.totalContractile+180*self.excitInput*self.totalContractile*self.curvinessFactor-100*self.velDependentForce*self.curvinessFactor+13*self.damperVal*self.curvinessFactor-1*np.sqrt(-520*self.damperVal*self.excitInput*self.totalContractile*self.curvinessFactor-520*self.excitInput*self.totalContractile*self.curvinessFactor*self.curvinessFactor*self.damperVal-72000*self.excitInput*self.totalContractile*self.curvinessFactor*self.velDependentForce+20000*self.velDependentForce*self.velDependentForce*self.curvinessFactor+32400*self.excitInput*self.excitInput*self.totalContractile*self.totalContractile+10000*self.velDependentForce*self.velDependentForce*self.curvinessFactor*self.curvinessFactor-36000*self.excitInput*self.totalContractile*self.curvinessFactor*self.curvinessFactor*self.velDependentForce+32400*self.excitInput*self.excitInput*self.totalContractile*self.totalContractile*self.curvinessFactor*self.curvinessFactor-36000*self.velDependentForce*self.excitInput*self.totalContractile+64800*self.excitInput*self.excitInput*self.totalContractile*self.totalContractile*self.curvinessFactor+2600*self.velDependentForce*self.curvinessFactor*self.curvinessFactor*self.damperVal+169*self.damperVal*self.damperVal*self.curvinessFactor*self.curvinessFactor+10000*self.velDependentForce*self.velDependentForce+2600*self.damperVal*self.curvinessFactor*self.velDependentForce)))/(self.damperVal*(1+self.curvinessFactor))
+        return self.normRate
+class FiberVelocityTension(object):
+    """
+        Compute force-velocity properties
+    """
+    def __init__(self):
+        self.curvinessFactor = 0.3
+
+    def calcVelocityScaling(self, contractionRate, optLen):
+
+        self.optLen = optLen
+        self.contractionRate = contractionRate
+
+        self.normRate = self.contractionRate / (10 * self.optLen)
+        dynamicForceFactor = []
+
+        if self.normRate <= 0:
+             dynamicForceFactor = ((self.normRate + 1)) / (-self.normRate / self.curvinessFactor + 1)
+        else:
+             dynamicForceFactor = ((1.8 * self.normRate + 0.13 * (self.curvinessFactor / (self.curvinessFactor + 1)))) / (self.normRate + 0.13 * (self.curvinessFactor / (self.curvinessFactor + 1)))
+             
+        return dynamicForceFactor
+
+
+class KinematicDeriver(object):
+    """
+        Compute velocity
+    """
+
+    def __init__(self):
+        self.timeStep = 0.001
+
+    def deriveRate(self, inputSig):
+        import numpy as np
+
+        self.lengthSignal = inputSig
+        rateOfChange = np.diff(self.lengthSignal, axis=0) * self.timeStep
+        return np.append(rateOfChange, rateOfChange[-1])
+
+
+class NeuralExcitationProcessor(object):
+    """
+        Compute muscle activation
+    """
+
+    def __init__(self):
+        self.actTimeConst = 0.015
+        self.deactTimeConst = 0.06
+        self.maxSignalAmp = 100
+        self.prevExcitation = 0
+
+
+    def processExcitation(self, rawSignal, signalCeiling):
+        self.signalCeiling = signalCeiling
+        self.rawSignal = rawSignal
+
+        beta = self.actTimeConst / self.deactTimeConst
+        self.excitationSlope = []
+        for i in range(0, len(self.rawSignal)):
+            self.excitationSlope.append(0)
+        self.neuralState = []
+        for i in range(0, len(self.rawSignal)):
+            self.neuralState.append(0)
+
+        for i in range(0, len(self.rawSignal)):
+            self.excitationSlope[i] = 1 / self.actTimeConst * (
+                self.rawSignal[i] / self.signalCeiling - (
+                    beta + (1 - beta) * self.rawSignal[i] / self.signalCeiling) * self.prevExcitation)
+            self.neuralState[i] = self.prevExcitation + 0.001 * self.excitationSlope[i]
+            self.prevExcitation = self.neuralState[i]
+
+        return self.neuralState
+
+
+class MyofascialUnit():
+    """
+        Compute muscle activation
+    """
+    def __init__(self, tissueID, geomModel=None, elasticModel = None, parallelModel = None, inverseVelModel = None,  activeTensionModel=None, dynamicTensionModel=None):
+        self.tissueID = tissueID
+        self.totalUnitLen = 1
+        self.seriesElasticLen = 1
+        self.kinematicsCalc = KinematicDeriver()
+        self.momentOffset = 0
+
+        if geomModel is None:
+            self.geomModel = MusculoSkeletalGeometry(tissueID)
+        else:
+            self.geomModel = geomModel
+
+        if activeTensionModel is None:
+            self.activeTensionModel = FiberActiveTension()
+        else:
+            self.activeTensionModel = activeTensionModel
+
+        if dynamicTensionModel is None:
+            self.dynamicTensionModel = FiberVelocityTension()
+        else:
+            self.dynamicTensionModel = dynamicTensionModel
+            
+        if elasticModel is None:
+            self.elasticModel = SeriesElasticElement()
+        else:
+            self.elasticModel = elasticModel
+
+        if inverseVelModel is None:
+            self.inverseVelModel = VelocityToForceMapper()
+        else:
+            self.inverseVelModel = inverseVelModel
+            
+        if parallelModel is None:
+            self.parallelModel = FiberPassiveTension()
+        else:
+            self.parallelModel = parallelModel
+        
+        self.signalCond = SignalConditioner()
+        
+    def computeEquilibrium(self, neuralInput, distalAngle, proximalAngle):
+        self.distalAngle = distalAngle
+        self.proximalAngle = proximalAngle
+
+        self.fiberLen = self.geomModel.calcFiberLength(self.distalAngle,self.proximalAngle) - self.geomModel.seriesElasticLen
+        self.leverArm = self.geomModel.calcMomentArm(self.distalAngle, self.proximalAngle)
+        self.contractionSpeed = self.kinematicsCalc.deriveRate(self.fiberLen)
+
+        self.speedForceFactor = []
+        for i in range(len(self.fiberLen)):
+            self.speedForceFactor.append(1)
+
+        self.speedForceFactor = self.dynamicTensionModel.calcVelocityScaling(self.contractionSpeed, self.geomModel.optFiberLen)
+
+        self.lenTensionFactor = self.activeTensionModel.calcActiveForceFactor(self.fiberLen, self.geomModel.optFiberLen)
+
+        self.fiberActiveTension = self.lenTensionFactor * neuralInput
+
+        self.totalForce = self.geomModel.maxIsoForce * self.fiberActiveTension * self.speedForceFactor
+
+        self.outputMoment = self.totalForce * self.leverArm
+
+        return self.outputMoment
+
+    def computeDynamicState(self, neuralInput, distalAngle, proximalAngle):
+        self.distalAngle = distalAngle
+        self.proximalAngle = proximalAngle
+        self.neuralInput = neuralInput
+
+        self.totalUnitLen = self.geomModel.calcFiberLength(self.distalAngle,self.proximalAngle)
+        self.unitLeverArm = self.geomModel.calcMomentArm(self.distalAngle, self.proximalAngle)
+        self.seriesElasticLen = self.geomModel.seriesElasticLen
+        self.optFiberLen = self.geomModel.optFiberLen
+
+        self.fiberLen = np.zeros((np.size(self.distalAngle)))
+        self.fiberLen[0] = self.totalUnitLen[0] - self.seriesElasticLen
+
+        self.tendonLen = np.zeros((np.size(self.distalAngle)))
+        self.tendonLen[0] = self.seriesElasticLen
+        
+        self.fiberActiveTension = np.zeros((np.size(self.distalAngle)))
+        self.seriesTension = np.zeros((np.size(self.distalAngle)))
+        self.fiberParallelTension = np.zeros((np.size(self.distalAngle)))
+        self.fiberActiveTension = np.zeros((np.size(self.distalAngle)))
+        self.totalContractileTension = np.zeros((np.size(self.distalAngle)))
+        self.rateDependentTension = np.zeros((np.size(self.distalAngle)))
+        self.contractionSpeed = np.zeros((np.size(self.distalAngle)))
+        self.outputMoment = np.zeros((np.size(self.distalAngle)))
+        self.tempTendonLen = 0
+        self.tempContractileTension = np.zeros((np.size(self.distalAngle)))
+        self.tempRateDepTension = np.zeros((np.size(self.distalAngle)))
+        self.tempSpeed = np.zeros((np.size(self.distalAngle)))
+        
+        
+        for i in range(1, len(self.distalAngle)):
+            
+            # Compute Tendon Force
+                            
+            self.seriesTension[i] = max(0, self.elasticModel.calcSeriesForce(self.tendonLen[i-1], self.seriesElasticLen))
+            
+            # compute muscle Passive Force            
+            self.fiberParallelTension[i] = 0
+
+            # compute fiber active force            
+            self.fiberActiveTension[i] = max(0, self.neuralInput[i] * self.activeTensionModel.calcActiveForceFactor(self.fiberLen[i-1], self.optFiberLen))
+
+            self.tempContractileTension[i] = self.fiberActiveTension[i] * self.dynamicTensionModel.calcVelocityScaling(self.contractionSpeed[i-1], self.geomModel.optFiberLen) + self.fiberParallelTension[i]
+            
+            if self.fiberActiveTension[i] > 0.01:
+                self.tempRateDepTension[i] = (self.seriesTension[i] - self.fiberParallelTension[i])  / (self.fiberActiveTension[i])
+            else :
+                self.tempRateDepTension[i] = 0
+            
+            self.rateDependentTension[i] = max(self.tempRateDepTension[i], 0)
+            self.rateDependentTension[i] = min(self.tempRateDepTension[i], 1.8)            
+            
+            self.tempSpeed[i] = self.inverseVelModel.calcNormVelocity(self.rateDependentTension[i], self.fiberActiveTension[i])
+
+
+            self.contractionSpeed[i] = min(self.tempSpeed[i], 1)
+            
+            self.contractionSpeed[i] = max(self.tempSpeed[i], -1)                        
+            
+            
+            self.fiberLen[i] = self.fiberLen[i-1] + 0.001 * (self.contractionSpeed[i] * 10 * self.optFiberLen)
+            
+
+            if self.fiberLen[i] >= 2 * self.optFiberLen :
+                self.fiberLen[i] = 2 * self.optFiberLen
+            elif self.fiberLen[i] <= 0 * self.optFiberLen :
+                self.fiberLen[i] = 0 * self.optFiberLen
+            else:
+                self.fiberLen[i] = self.fiberLen[i]
+
+            self.tendonLen[i] = self.totalUnitLen[i]-self.fiberLen[i]
+
+            self.outputMoment[i] =  max(0,self.geomModel.maxIsoForce * (self.seriesTension[i] ) * self.unitLeverArm[i] - self.momentOffset)
+                        
+        return self.outputMoment 
+
+
+class JointKineticsSolver:
+    def __init__(self):
+        self.inertialProp = 0.7
+        self.viscousProp = 1
+        self.elasticProp = 4
+        self.gravityFactor = 18
+
+    def calculateNetMoments(self, distalAngle, distalVel, distalAccel, restingAngle):
+        self.distalAngle = distalAngle
+        self.distalVel = distalVel
+        self.distalAccel = distalAccel
+        self.restingAngle = restingAngle
+        self.netMoment = []
+
+        for i in range(0, len(distalAngle)):
+            self.netMoment.append(0)
+        for i in range(0, len(self.distalAngle)):
+            self.netMoment[i] = distalAccel[i] * self.inertialProp + distalVel[
+                i] * self.viscousProp + self.elasticProp * (
+                                              self.distalAngle[i] - self.restingAngle[i]) + self.gravityFactor * sin(
+                self.distalAngle[i] - self.restingAngle[i])
+        return self.netMoment
+
+
+class SignalConditioner:
+    def __init__(self):
+        self.lowPassOrder = 4
+        self.windowSize = 200
+        self.cutoffFreq = 1.5
+
+    def lowPassFilter(self, rawData, cutoffFreq):
+        self.cutoffFreq = cutoffFreq
+        self.rawData = rawData
+        b, a = signal.butter(self.lowPassOrder, self.cutoffFreq * 2 / 1000, 'low', analog=False)
+        print(b,a)
+        return signal.lfilter(b, a, self.rawData, axis=-1, zi=None)
+
+    def movingAverageFilter(self, rawData, windowSize):
+        self.windowSize = windowSize
+        self.rawData = rawData
+        kernels = np.ones(self.windowSize) * self.windowSize
+        return signal.lfilter(kernels, 1, self.rawData, axis=-1, zi=None)
+
+
+class PassiveLengthTension():
+    pass
